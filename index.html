@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>ESP32 无人机 PID 地面站调试仿真器</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; }
+        body { margin: 0; overflow: hidden; background-color: #0f141c; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+        
+        /* 通用面板样式 */
+        .panel {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+        h3 { margin: 0 0 12px 0; font-size: 15px; color: #38bdf8; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px; letter-spacing: 0.5px; }
+
+        /* 左侧控制面板 */
+        #control-panel { top: 16px; left: 16px; width: 280px; }
+        .slider-group { margin-bottom: 12px; }
+        .slider-header { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+        .val-badge { color: #38bdf8; font-family: monospace; font-weight: bold; }
+        input[type=range] { width: 100%; accent-color: #38bdf8; cursor: pointer; height: 6px; border-radius: 3px; }
+        
+        .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+        button {
+            padding: 8px 10px; background: #0284c7; color: white; border: none;
+            border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+            transition: background 0.2s;
+        }
+        button:hover { background: #0369a1; }
+        button.secondary { background: #334155; }
+        button.secondary:hover { background: #475569; }
+
+        /* 右侧遥测数据面板 */
+        #telemetry-panel { top: 16px; right: 16px; width: 290px; }
+        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+        .data-box { background: rgba(0, 0, 0, 0.35); padding: 8px 10px; border-radius: 6px; border-left: 3px solid #38bdf8; }
+        .data-box.p-box { border-left-color: #f59e0b; }
+        .data-box.i-box { border-left-color: #10b981; }
+        .data-box.d-box { border-left-color: #ec4899; }
+        .data-label { font-size: 11px; color: #94a3b8; }
+        .data-value { font-size: 16px; font-family: monospace; font-weight: bold; margin-top: 2px; }
+
+        /* 电机 PWM 状态条 */
+        .motor-bar-wrap { margin-top: 8px; }
+        .motor-label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; color: #cbd5e1; }
+        .progress-bg { width: 100%; height: 8px; background: #1e293b; border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444); width: 50%; transition: width 0.05s; }
+
+        /* 底部实时波形图面板 */
+        #chart-panel { bottom: 16px; left: 16px; right: 16px; height: 210px; padding: 12px 16px; }
+        .chart-container { position: relative; width: 100%; height: 160px; }
+
+        /* 顶部操作提示 */
+        #hint {
+            position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.7); padding: 6px 14px; border-radius: 20px;
+            font-size: 12px; color: #94a3b8; border: 1px solid rgba(255,255,255,0.08);
+            pointer-events: none;
+        }
+    </style>
+    <!-- 引入 Three.js 核心与 OrbitControls 视角控制器 -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- 引入 Chart.js 绘图库 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+</head>
+<body>
+
+    <div id="hint">🖱️ 鼠标左键旋转视角 | 滚轮缩放 | 右键平移</div>
+
+    <!-- 左侧：PID 参数与环境控制 -->
+    <div id="control-panel" class="panel">
+        <h3>🎛️ PID 参数与环境激励</h3>
+        
+        <div class="slider-group">
+            <div class="slider-header"><span>Kp (比例-弹簧拉力)</span><span id="kp-val" class="val-badge">2.0</span></div>
+            <input type="range" id="kp" min="0" max="8" step="0.1" value="2.0">
+        </div>
+        <div class="slider-group">
+            <div class="slider-header"><span>Ki (积分-消除静差)</span><span id="ki-val" class="val-badge">0.40</span></div>
+            <input type="range" id="ki" min="0" max="3" step="0.05" value="0.40">
+        </div>
+        <div class="slider-group">
+            <div class="slider-header"><span>Kd (微分-阻尼刹车)</span><span id="kd-val" class="val-badge">1.0</span></div>
+            <input type="range" id="kd" min="0" max="4" step="0.05" value="1.0">
+        </div>
+
+        <hr style="border:none; border-top:1px solid rgba(255,255,255,0.1); margin: 12px 0;">
+
+        <div class="slider-group">
+            <div class="slider-header"><span>🎯 目标角度 (Setpoint)</span><span id="sp-val" class="val-badge">0°</span></div>
+            <input type="range" id="setpoint" min="-45" max="45" step="1" value="0">
+        </div>
+        <div class="slider-group">
+            <div class="slider-header"><span>⚖️ 重心偏移 / 持续侧风</span><span id="bias-val" class="val-badge">0.0</span></div>
+            <input type="range" id="bias" min="-2.0" max="2.0" step="0.1" value="0.0">
+        </div>
+        <div class="slider-group">
+            <div class="slider-header"><span>📡 陀螺仪噪声 (测试D项)</span><span id="noise-val" class="val-badge">0.0</span></div>
+            <input type="range" id="noise" min="0" max="2.0" step="0.1" value="0.0">
+        </div>
+
+        <div class="btn-group">
+            <button onclick="applyWindGust()">🌪️ 瞬间阵风扰动</button>
+            <button class="secondary" onclick="resetSystem()">🔄 重置状态</button>
+        </div>
+    </div>
+
+    <!-- 右侧：实时数值遥测面板 -->
+    <div id="telemetry-panel" class="panel">
+        <h3>📊 实时遥测与 PID 拆解</h3>
+        <div class="data-grid">
+            <div class="data-box">
+                <div class="data-label">当前角度 (Pitch)</div>
+                <div class="data-value" id="tel-pitch">0.0°</div>
+            </div>
+            <div class="data-box">
+                <div class="data-label">当前误差 (Error)</div>
+                <div class="data-value" id="tel-error">0.0°</div>
+            </div>
+            <div class="data-box p-box">
+                <div class="data-label">P 项输出 (比例)</div>
+                <div class="data-value" id="tel-p">0.00</div>
+            </div>
+            <div class="data-box i-box">
+                <div class="data-label">I 项输出 (积分)</div>
+                <div class="data-value" id="tel-i">0.00</div>
+            </div>
+            <div class="data-box d-box">
+                <div class="data-label">D 项输出 (微分)</div>
+                <div class="data-value" id="tel-d">0.00</div>
+            </div>
+            <div class="data-box">
+                <div class="data-label">PID 总输出力矩</div>
+                <div class="data-value" id="tel-out">0.00</div>
+            </div>
+        </div>
+
+        <div class="motor-bar-wrap">
+            <div class="motor-label"><span>左电机 PWM 推力</span><span id="pwm-left-text">50%</span></div>
+            <div class="progress-bg"><div id="pwm-left-bar" class="progress-fill"></div></div>
+        </div>
+        <div class="motor-bar-wrap">
+            <div class="motor-label"><span>右电机 PWM 推力</span><span id="pwm-right-text">50%</span></div>
+            <div class="progress-bg"><div id="pwm-right-bar" class="progress-fill"></div></div>
+        </div>
+    </div>
+
+    <!-- 底部：Chart.js 实时示波器 -->
+    <div id="chart-panel" class="panel">
+        <h3>📈 姿态响应示波器 (目标角度 vs 实际角度)</h3>
+        <div class="chart-container">
+            <canvas id="pidChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // ================= 1. 初始化 Three.js 3D 场景 =================
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0f141c, 0.035);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 2.5, 6.5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // 鼠标自由视角控制器
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.target.set(0, -0.5, 0);
+
+        // 空间网格与坐标轴参考系
+        const gridHelper = new THREE.GridHelper(24, 24, 0x38bdf8, 0x1e293b);
+        gridHelper.position.y = -1.8;
+        scene.add(gridHelper);
+
+        const axesHelper = new THREE.AxesHelper(1.5);
+        axesHelper.position.set(0, -1.79, 0);
+        scene.add(axesHelper);
+
+        // 灯光设置
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+        scene.add(new THREE.AmbientLight(0x475569, 1.5));
+
+        // ================= 2. 构建无人机与目标参考线模型 =================
+        const droneGroup = new THREE.Group();
+        
+        // 机身中心与机臂
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.3, metalness: 0.6 });
+        const armMat = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.4 });
+        const centerBox = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.25, 0.8), bodyMat);
+        const mainArm = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.12, 0.2), armMat);
+        const crossArm = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 3.0), bodyMat);
+        droneGroup.add(centerBox, mainArm, crossArm);
+
+        // 左右电机与螺旋桨
+        const propGeo = new THREE.CylinderGeometry(0.7, 0.7, 0.02, 24);
+        const propMatLeft = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.6 });
+        const propMatRight = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.6 });
+        
+        const propLeft = new THREE.Mesh(propGeo, propMatLeft);
+        propLeft.position.set(-2.0, 0.18, 0);
+        const propRight = new THREE.Mesh(propGeo, propMatRight);
+        propRight.position.set(2.0, 0.18, 0);
+        droneGroup.add(propLeft, propRight);
+
+        scene.add(droneGroup);
+
+        // 目标角度虚线参考环 (绿色半透明基准线，直观显示 Setpoint 位置)
+        const targetRefGeo = new THREE.BoxGeometry(4.6, 0.03, 0.05);
+        const targetRefMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.45 });
+        const targetRefMesh = new THREE.Mesh(targetRefGeo, targetRefMat);
+        scene.add(targetRefMesh);
+
+        // ================= 3. 初始化 Chart.js 实时波形图 =================
+        const ctx = document.getElementById('pidChart').getContext('2d');
+        const maxDataPoints = 120;
+        const initialLabels = Array(maxDataPoints).fill('');
+        const initialTarget = Array(maxDataPoints).fill(0);
+        const initialActual = Array(maxDataPoints).fill(0);
+
+        const pidChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: initialLabels,
+                datasets: [
+                    {
+                        label: '目标角度 Setpoint (°)',
+                        data: initialTarget,
+                        borderColor: '#10b981',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        pointRadius: 0,
+                        tension: 0.1
+                    },
+                    {
+                        label: '实际俯仰角 Pitch (°)',
+                        data: initialActual,
+                        borderColor: '#38bdf8',
+                        backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.2
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    x: { display: false },
+                    y: {
+                        min: -60,
+                        max: 60,
+                        grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                        ticks: { color: '#94a3b8', font: { size: 11 } }
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: '#cbd5e1', font: { size: 12 }, boxWidth: 14 } }
+                }
+            }
+        });
+
+        // ================= 4. 物理与 PID 控制变量 =================
+        let pitch = 0;           // 真实角度 (弧度)
+        let pitchVelocity = 0;   // 角速度 (弧度/秒)
+        let integral = 0;        // 误差积分
+        let lastError = 0;       // 上一帧误差
+        let lastTime = performance.now();
+        let frameCount = 0;
+
+        // UI 事件绑定
+        const getVal = id => parseFloat(document.getElementById(id).value);
+        const bindSlider = (id, valId, suffix = '') => {
+            const el = document.getElementById(id);
+            el.addEventListener('input', () => {
+                document.getElementById(valId).innerText = el.value + suffix;
+                if (id === 'setpoint') {
+                    targetRefMesh.rotation.z = THREE.MathUtils.degToRad(parseFloat(el.value));
+                }
+            });
+        };
+        bindSlider('kp', 'kp-val');
+        bindSlider('ki', 'ki-val');
+        bindSlider('kd', 'kd-val');
+        bindSlider('setpoint', 'sp-val', '°');
+        bindSlider('bias', 'bias-val');
+        bindSlider('noise', 'noise-val');
+
+        function applyWindGust() {
+            const gust = (Math.random() > 0.5 ? 1 : -1) * (2.5 + Math.random() * 1.5);
+            pitchVelocity += gust;
+        }
+
+        function resetSystem() {
+            pitch = 0;
+            pitchVelocity = 0;
+            integral = 0;
+            lastError = 0;
+            document.getElementById('setpoint').value = 0;
+            document.getElementById('sp-val').innerText = '0°';
+            document.getElementById('bias').value = 0;
+            document.getElementById('bias-val').innerText = '0.0';
+            targetRefMesh.rotation.z = 0;
+        }
+
+        // ================= 5. 主仿真循环 =================
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+
+            if (dt > 0 && dt < 0.1) {
+                // 1. 获取控制参数
+                const kp = getVal('kp');
+                const ki = getVal('ki');
+                const kd = getVal('kd');
+                const targetDeg = getVal('setpoint');
+                const targetRad = THREE.MathUtils.degToRad(targetDeg);
+                const biasTorque = getVal('bias');
+                const noiseLevel = getVal('noise');
+
+                // 2. 模拟传感器读取 (加入陀螺仪高斯噪声)
+                const sensorNoise = (Math.random() - 0.5) * THREE.MathUtils.degToRad(noiseLevel * 3);
+                const measuredPitch = pitch + sensorNoise;
+
+                // 3. 计算 PID 各项
+                const error = targetRad - measuredPitch;
+                integral += error * dt;
+                // 积分限幅 (Anti-windup)
+                integral = Math.max(-5, Math.min(5, integral));
+
+                const derivative = (error - lastError) / dt;
+                lastError = error;
+
+                const pTerm = kp * error;
+                const iTerm = ki * integral;
+                const dTerm = kd * derivative;
+                const pidOutput = pTerm + iTerm + dTerm;
+
+                // 4. 物理引擎解算 (力矩 -> 角加速度 -> 角速度 -> 角度)
+                const inertia = 0.8;
+                const totalTorque = pidOutput + biasTorque;
+                const angularAccel = totalTorque / inertia;
+
+                pitchVelocity += angularAccel * dt;
+                pitchVelocity *= 0.985; // 空气阻力
+                pitch += pitchVelocity * dt;
+
+                // 更新 3D 模型姿态
+                droneGroup.rotation.z = pitch;
+
+                // 5. 计算左右电机虚拟 PWM (基础悬停油门 50% ± PID输出)
+                const baseThrottle = 50;
+                const pwmOffset = pidOutput * 18;
+                const leftPWM = Math.max(0, Math.min(100, baseThrottle - pwmOffset));
+                const rightPWM = Math.max(0, Math.min(100, baseThrottle + pwmOffset));
+
+                // 螺旋桨视觉颜色随负载动态变化
+                propMatLeft.color.setHSL((1 - leftPWM / 100) * 0.35, 0.9, 0.5);
+                propMatRight.color.setHSL((1 - rightPWM / 100) * 0.35, 0.9, 0.5);
+
+                // 6. 更新遥测面板与波形图 (每 2 帧刷新一次 UI，保证渲染流畅度)
+                frameCount++;
+                if (frameCount % 2 === 0) {
+                    const pitchDeg = THREE.MathUtils.radToDeg(pitch);
+                    const errorDeg = THREE.MathUtils.radToDeg(error);
+
+                    document.getElementById('tel-pitch').innerText = pitchDeg.toFixed(1) + '°';
+                    document.getElementById('tel-error').innerText = errorDeg.toFixed(1) + '°';
+                    document.getElementById('tel-p').innerText = pTerm.toFixed(2);
+                    document.getElementById('tel-i').innerText = iTerm.toFixed(2);
+                    document.getElementById('tel-d').innerText = dTerm.toFixed(2);
+                    document.getElementById('tel-out').innerText = pidOutput.toFixed(2);
+
+                    document.getElementById('pwm-left-text').innerText = Math.round(leftPWM) + '%';
+                    document.getElementById('pwm-left-bar').style.width = leftPWM + '%';
+                    document.getElementById('pwm-right-text').innerText = Math.round(rightPWM) + '%';
+                    document.getElementById('pwm-right-bar').style.width = rightPWM + '%';
+
+                    // 更新示波器曲线
+                    pidChart.data.datasets[0].data.push(targetDeg);
+                    pidChart.data.datasets[0].data.shift();
+                    pidChart.data.datasets[1].data.push(pitchDeg);
+                    pidChart.data.datasets[1].data.shift();
+                    pidChart.update('none');
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
